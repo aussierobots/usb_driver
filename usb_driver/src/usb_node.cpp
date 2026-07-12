@@ -58,7 +58,10 @@ public:
       .automatically_declare_parameters_from_overrides(true)
       .use_intra_process_comms(true))
   {
-    RCLCPP_INFO(get_logger(), "starting %s", get_name());
+    is_initialising_ = true;
+
+    auto domain_id = options.context()->get_domain_id();  // ensure context is initialised
+    RCLCPP_INFO(get_logger(), "starting %s with ROS_DOMAIN_ID=%ld", get_name(), domain_id);
 
     // used to indicate if threads and timers should shut down
     keep_running_ = true;
@@ -76,7 +79,7 @@ public:
     callback_group_usb_events_timer_ = create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
 
-    is_initialising_ = true;
+
     device_readiness_state_ = DeviceReadinessState::UNREADY;
     has_been_connected_before_ = false;
     device_attached_ = false;
@@ -156,6 +159,8 @@ public:
     handle_usb_events_timer_ = create_wall_timer(
       10ms, std::bind(&UsbNode::handle_usb_events_callback, this),
       callback_group_usb_events_timer_);
+
+    is_initialising_ = false;
   }
 
   USB_DRIVER_LOCAL
@@ -573,6 +578,52 @@ private:
     RCLCPP_WARN(get_logger(), "USB device disconnected");
     device_attached_ = false;
     device_readiness_state_ = DeviceReadinessState::UNREADY;
+  }
+
+  USB_DRIVER_LOCAL
+  void usb_queue_frame_in(usb_queue_frame_t * f)
+  {
+    if (f == nullptr) {
+      RCLCPP_ERROR(get_logger(), "usb_queue_frame_in: frame pointer is null");
+      return;
+    }
+
+    auto usb_frame = usb_msgs::msg::USBFrame();
+    usb_frame.header.stamp = f->ts;
+    usb_frame.header.frame_id = frame_id_;
+    usb_frame.data = std::vector<uint8_t>(f->buf.data(), f->buf.data() + f->buf.size());
+    usb_frame.frame_xfer_type = usb_msgs::msg::USBFrame::FRAME_XFER_TYPE_IN;
+
+    usb_frame_pub_->publish(std::move(usb_frame));
+
+    //
+    // {
+    //   const char * remove_any_of = "\n\r";
+    //   std::string frame_data (reinterpret_cast<const char*>(f->buf.data()), f->buf.size());
+    //   frame_data.erase(frame_data.find_last_not_of(remove_any_of) + 1);
+    //   RCLCPP_DEBUG(get_logger(), "published usb frame data: %s", frame_data.c_str());
+    // }
+    // alteratively use ros2 topic echo /usb_frame --raw
+    RCLCPP_DEBUG(get_logger(), "published usb frame in with %lu bytes", f->buf.size());
+  }
+
+  USB_DRIVER_LOCAL
+  void usb_queue_frame_out(usb_queue_frame_t * f)
+  {
+    if (f == nullptr) {
+      RCLCPP_ERROR(get_logger(), "usb_queue_frame_out: frame pointer is null");
+      return;
+    }
+
+    auto usb_frame = usb_msgs::msg::USBFrame();
+    usb_frame.header.stamp = f->ts;
+    usb_frame.header.frame_id = frame_id_;
+    usb_frame.data = std::vector<uint8_t>(f->buf.data(), f->buf.data() + f->buf.size());
+    usb_frame.frame_xfer_type = usb_msgs::msg::USBFrame::FRAME_XFER_TYPE_OUT;
+
+    usb_frame_pub_->publish(std::move(usb_frame));
+
+    RCLCPP_DEBUG(get_logger(), "published usb frame out with %lu bytes", f->buf.size());
   }
 
   USB_DRIVER_LOCAL

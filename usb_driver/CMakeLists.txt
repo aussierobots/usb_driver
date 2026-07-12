@@ -41,8 +41,8 @@ target_link_libraries(usb_driver_components PUBLIC
 )
 
 rclcpp_components_register_node(usb_driver_components
-  PLUGIN "usb_driver::UsbDriverNode"
-  EXECUTABLE usb_driver_node)
+  PLUGIN "usb_driver::UsbNode"
+  EXECUTABLE usb_node)
 
 install(TARGETS
   usb_driver_components
