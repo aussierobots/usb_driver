@@ -118,31 +118,8 @@ public:
     disconnect_service_ = this->create_service<usb_driver_srvs::srv::Disconnect>(
       node_name + "/disconnect", std::bind(&UsbNode::disconnect_callback, this, _1, _2));
 
-    usb::connection_in_cb_fn connection_in_callback = std::bind(
-      &UsbNode::usb_in_callback,
-      this, _1);
-    usb::connection_out_cb_fn connection_out_callback = std::bind(
-      &UsbNode::usb_out_callback, this, _1);
-    usb::connection_exception_cb_fn connection_exception_callback = std::bind(
-      &UsbNode::usb_exception_callback, this, _1, _2);
-    usb::hotplug_attach_cb_fn usb_hotplug_attach_callback = std::bind(
-      &UsbNode::hotplug_attach_callback, this);
-    usb::hotplug_detach_cb_fn usb_hotplug_detach_callback = std::bind(
-      &UsbNode::hotplug_detach_callback, this);
-    usb::connection_debug_cb_fn connection_debug_callback = std::bind(
-      &UsbNode::usb_debug_callback, this, _1);
-
-    usbc_ = std::make_shared<usb::Connection>(
-      vendor_id_, product_id_,
-      serial_str_);
-
-    RCLCPP_DEBUG(get_logger(), "setting up usb callbacks ...");
-    usbc_->set_in_callback(connection_in_callback);
-    usbc_->set_out_callback(connection_out_callback);
-    usbc_->set_exception_callback(connection_exception_callback);
-    usbc_->set_hotplug_attach_callback(usb_hotplug_attach_callback);
-    usbc_->set_hotplug_detach_callback(usb_hotplug_detach_callback);
-    usbc_->set_debug_callback(connection_debug_callback);
+    // make the usb connection - reused for reconnects
+    make_usb_connection();
 
     // initialise usb timer - once intialised the timer will be cancelled
     RCLCPP_DEBUG(get_logger(), "creating usb_init_timer_ ...");
@@ -223,6 +200,37 @@ private:
 
   rclcpp::Service<usb_driver_srvs::srv::Connect>::SharedPtr connect_service_;
   rclcpp::Service<usb_driver_srvs::srv::Disconnect>::SharedPtr disconnect_service_;
+
+  USB_DRIVER_LOCAL
+  void make_usb_connection()
+  {
+    RCLCPP_DEBUG(get_logger(), "Making USB connection ...");
+    usb::connection_in_cb_fn connection_in_callback = std::bind(
+      &UsbNode::usb_in_callback,
+      this, _1);
+    usb::connection_out_cb_fn connection_out_callback = std::bind(
+      &UsbNode::usb_out_callback, this, _1);
+    usb::connection_exception_cb_fn connection_exception_callback = std::bind(
+      &UsbNode::usb_exception_callback, this, _1, _2);
+    usb::hotplug_attach_cb_fn usb_hotplug_attach_callback = std::bind(
+      &UsbNode::hotplug_attach_callback, this);
+    usb::hotplug_detach_cb_fn usb_hotplug_detach_callback = std::bind(
+      &UsbNode::hotplug_detach_callback, this);
+    usb::connection_debug_cb_fn connection_debug_callback = std::bind(
+      &UsbNode::usb_debug_callback, this, _1);
+
+    usbc_ = std::make_shared<usb::Connection>(
+      vendor_id_, product_id_,
+      serial_str_);
+
+    RCLCPP_DEBUG(get_logger(), "setting up usb callbacks ...");
+    usbc_->set_in_callback(connection_in_callback);
+    usbc_->set_out_callback(connection_out_callback);
+    usbc_->set_exception_callback(connection_exception_callback);
+    usbc_->set_hotplug_attach_callback(usb_hotplug_attach_callback);
+    usbc_->set_hotplug_detach_callback(usb_hotplug_detach_callback);
+    usbc_->set_debug_callback(connection_debug_callback);
+  }
 
   USB_DRIVER_LOCAL
   void log_usbc()
@@ -371,8 +379,37 @@ private:
     std::shared_ptr<usb_driver_srvs::srv::Connect::Response> response)
   {
     (void)request;
-    RCLCPP_WARN(
+    RCLCPP_DEBUG(
       get_logger(), "connect service called");
+
+    if (is_initialising_) {
+      RCLCPP_WARN(get_logger(), "connect service called but node is still initialising");
+      return;
+    }
+
+    if (usbc_ && usbc_->devh_valid()) {
+      RCLCPP_WARN(get_logger(), "connect service called but device is already connected");
+      return;
+    }
+
+    // If a previous connection exists, reset it before attempting to connect again
+    if (usbc_) {
+      usbc_.reset();
+    }
+    make_usb_connection();
+
+    if (!usbc_) {
+      RCLCPP_ERROR_ONCE(get_logger(), "connect service called but usbc_ is null");
+      return;
+    }
+
+    if (usbc_) {
+      perform_usb_initialization();
+      device_readiness_state_ = DeviceReadinessState::READY;
+      RCLCPP_INFO(get_logger(), "connect service completed");
+    } else {
+      RCLCPP_ERROR_ONCE(get_logger(), "usbc_ wasnt created when attempting to initialise USB!");
+    }
 
     (void)response;
   }
@@ -383,9 +420,32 @@ private:
     std::shared_ptr<usb_driver_srvs::srv::Disconnect::Response> response)
   {
     (void)request;
-    RCLCPP_WARN(
+    RCLCPP_DEBUG(
       get_logger(), "connect service called");
 
+    if (is_initialising_) {
+      RCLCPP_WARN(get_logger(), "disconnect service called but node is still initialising");
+      return;
+    }
+
+    if (!usbc_) {
+      RCLCPP_ERROR_ONCE(get_logger(), "disconnect service called but usbc_ is null");
+      return;
+    }
+
+    if (usbc_ && !usbc_->devh_valid()) {
+      RCLCPP_WARN(get_logger(), "disconnect service called but device is already disconnected");
+      return;
+    }
+    if (usbc_) {
+      RCLCPP_INFO(get_logger(), "disconnect service called - shutting down USB connection");
+      device_readiness_state_ = DeviceReadinessState::UNREADY;
+      device_attached_ = false;
+      has_been_connected_before_ = false;
+      usbc_->shutdown();
+    } else {
+      RCLCPP_ERROR_ONCE(get_logger(), "usbc_ wasnt created when attempting to disconnect USB!");
+    }
     (void)response;
   }
 
@@ -393,9 +453,9 @@ private:
   void perform_usb_initialization(bool from_timer = false)
   {
     if (from_timer) {
-      RCLCPP_INFO(get_logger(), "Starting USB initialization");
+      RCLCPP_INFO(get_logger(), "Starting USB initialization (from timer)");
     } else {
-      RCLCPP_INFO(get_logger(), "Starting USB initialization (from hotplug)");
+      RCLCPP_INFO(get_logger(), "Starting USB initialization");
     }
 
     try {
@@ -404,7 +464,7 @@ private:
 
       // Check device readiness
       if (!usbc_->devh_valid()) {
-        RCLCPP_DEBUG(get_logger(), "Device not ready for init_async");
+        RCLCPP_WARN(get_logger(), "Device not ready for init_async");
         return;
       }
 
