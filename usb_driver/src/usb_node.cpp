@@ -27,8 +27,10 @@
 #include "usb_driver_srvs/srv/connect.hpp"
 #include "usb_driver_srvs/srv/disconnect.hpp"
 #include "usb_driver_srvs/srv/is_connected.hpp"
+#include "usb_driver_srvs/srv/transfer_out.hpp"
 #include "usb_msgs/msg/usb_frame.hpp"
-#include "usb_msgs/usb_encodings.hpp"
+#include "usb_msgs/usb_transport_encodings.hpp"
+#include "usb_msgs/usb_application_encodings.hpp"
 
 using namespace std::chrono_literals;
 using std::placeholders::_1;
@@ -111,7 +113,8 @@ public:
     // ros2 parameter call backs
     parameters_callback_handle_ =
       this->add_on_set_parameters_callback(
-      std::bind(&UsbNode::on_set_parameters_callback,
+      std::bind(
+        &UsbNode::on_set_parameters_callback,
         this, _1));
 
     std::string node_name(this->get_name());
@@ -121,6 +124,8 @@ public:
       node_name + "/disconnect", std::bind(&UsbNode::disconnect_callback, this, _1, _2));
     is_connected_service_ = this->create_service<usb_driver_srvs::srv::IsConnected>(
       node_name + "/is_connected", std::bind(&UsbNode::is_connected_callback, this, _1, _2));
+    transfer_out_service_ = this->create_service<usb_driver_srvs::srv::TransferOut>(
+      node_name + "/transfer_out", std::bind(&UsbNode::transfer_out_callback, this, _1, _2));
 
     // make the usb connection - reused for reconnects
     make_usb_connection();
@@ -199,12 +204,19 @@ private:
   std::string serial_str_;
   const std::string DEV_STRING_PARAM_NAME = "DEVICE_SERIAL_STRING";
 
+  std::string transport_encoding_ =
+    std::string(usb_msgs::usb_transport_encodings::RAW);
+
+  std::string application_encoding_;
+  const std::string APPLICATION_ENCODING_PARAM_NAME{"APPLICATION_ENCODING"};
+
   rclcpp::Publisher<usb_msgs::msg::USBFrame>::SharedPtr usb_frame_pub_;
 
 
   rclcpp::Service<usb_driver_srvs::srv::Connect>::SharedPtr connect_service_;
   rclcpp::Service<usb_driver_srvs::srv::Disconnect>::SharedPtr disconnect_service_;
   rclcpp::Service<usb_driver_srvs::srv::IsConnected>::SharedPtr is_connected_service_;
+  rclcpp::Service<usb_driver_srvs::srv::TransferOut>::SharedPtr transfer_out_service_;
 
   USB_DRIVER_LOCAL
   void make_usb_connection()
@@ -352,6 +364,46 @@ private:
       FRAME_ID_PARAM_NAME.c_str(), frame_id_.c_str());
   }
 
+  USB_DRIVER_LOCAL
+  void check_for_application_encoding_param(
+    rclcpp::SyncParametersClient::SharedPtr param_client)
+  {
+    namespace app_encodings = usb_msgs::usb_application_encodings;
+
+    // Generic USB data is treated as opaque unless explicitly configured.
+    application_encoding_ = std::string{app_encodings::OPAQUE};
+
+    if (!param_client->has_parameter(APPLICATION_ENCODING_PARAM_NAME)) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Parameter %s not found, defaulting to application encoding '%s'",
+        APPLICATION_ENCODING_PARAM_NAME.c_str(),
+        application_encoding_.c_str());
+      return;
+    }
+
+    const auto requested_encoding =
+      param_client->get_parameter<std::string>(
+      APPLICATION_ENCODING_PARAM_NAME);
+
+    if (!app_encodings::isSupportedEncoding(requested_encoding)) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Parameter %s has unsupported value '%s', defaulting to '%s'",
+        APPLICATION_ENCODING_PARAM_NAME.c_str(),
+        requested_encoding.c_str(),
+        application_encoding_.c_str());
+      return;
+    }
+
+    application_encoding_ = requested_encoding;
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Parameter %s found with value: %s",
+      APPLICATION_ENCODING_PARAM_NAME.c_str(),
+      application_encoding_.c_str());
+  }
   // on set parameters callback function
   USB_DRIVER_LOCAL
   rcl_interfaces::msg::SetParametersResult on_set_parameters_callback(
@@ -484,7 +536,46 @@ private:
       RCLCPP_DEBUG(get_logger(), "is_connected service called - USB device is connected");
       response->connected = true;
     } else {
-      RCLCPP_ERROR_ONCE(get_logger(), "usbc_ wasnt created when attempting to check USB connection!");
+      RCLCPP_ERROR_ONCE(
+        get_logger(),
+        "usbc_ wasnt created when attempting to check USB connection!");
+    }
+  }
+
+  USB_DRIVER_LOCAL
+  void transfer_out_callback(
+    const std::shared_ptr<usb_driver_srvs::srv::TransferOut::Request> request,
+    std::shared_ptr<usb_driver_srvs::srv::TransferOut::Response> response)
+  {
+    (void)response;
+    RCLCPP_DEBUG(
+      get_logger(), "transfer_out service called");
+
+    if (is_initialising_) {
+      RCLCPP_WARN(get_logger(), "transfer_out service called but node is still initialising");
+      return;
+    }
+
+    if (!usbc_) {
+      RCLCPP_ERROR_ONCE(get_logger(), "transfer_out service called but usbc_ is null");
+      return;
+    }
+
+    if (usbc_ && !usbc_->devh_valid()) {
+      RCLCPP_WARN(get_logger(), "transfer_out service called but device is disconnected");
+      return;
+    }
+
+    if (usbc_) {
+      RCLCPP_DEBUG(get_logger(), "transfer_out service called - sending data to USB device");
+      usbc_->write_buffer_async(
+        reinterpret_cast<u_char *>(request->buffer.data()),
+        request->buffer.size(),
+        nullptr);
+    } else {
+      RCLCPP_ERROR_ONCE(
+        get_logger(),
+        "usbc_ wasnt created when attempting to transfer out to USB device!");
     }
   }
 
@@ -690,7 +781,8 @@ private:
     auto usb_frame = usb_msgs::msg::USBFrame();
     usb_frame.header.stamp = f->ts;
     usb_frame.header.frame_id = frame_id_;
-    usb_frame.encoding = usb_msgs::usb_encodings::RAW;
+    usb_frame.transport_encoding = transport_encoding_;
+    usb_frame.application_encoding = application_encoding_;
     usb_frame.data = std::vector<uint8_t>(f->buf.data(), f->buf.data() + f->buf.size());
     usb_frame.frame_xfer_type = usb_msgs::msg::USBFrame::FRAME_XFER_TYPE_IN;
 
@@ -718,6 +810,8 @@ private:
     auto usb_frame = usb_msgs::msg::USBFrame();
     usb_frame.header.stamp = f->ts;
     usb_frame.header.frame_id = frame_id_;
+    usb_frame.transport_encoding = transport_encoding_;
+    usb_frame.application_encoding = application_encoding_;
     usb_frame.data = std::vector<uint8_t>(f->buf.data(), f->buf.data() + f->buf.size());
     usb_frame.frame_xfer_type = usb_msgs::msg::USBFrame::FRAME_XFER_TYPE_OUT;
 
