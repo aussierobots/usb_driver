@@ -102,6 +102,7 @@ public:
     check_for_device_serial_param(parameters_client);
     check_for_vendor_id_param(parameters_client);
     check_for_product_id_param(parameters_client);
+    check_for_application_encoding_param(parameters_client);
 
     auto qos = rclcpp::SystemDefaultsQoS();
     rclcpp::PublisherOptions pub_options;
