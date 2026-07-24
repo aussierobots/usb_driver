@@ -26,7 +26,9 @@
 #include "usb_driver/usb.hpp"
 #include "usb_driver_srvs/srv/connect.hpp"
 #include "usb_driver_srvs/srv/disconnect.hpp"
+#include "usb_driver_srvs/srv/is_connected.hpp"
 #include "usb_msgs/msg/usb_frame.hpp"
+#include "usb_msgs/usb_encodings.hpp"
 
 using namespace std::chrono_literals;
 using std::placeholders::_1;
@@ -109,7 +111,7 @@ public:
     // ros2 parameter call backs
     parameters_callback_handle_ =
       this->add_on_set_parameters_callback(
-      std::bind( &UsbNode::on_set_parameters_callback,
+      std::bind(&UsbNode::on_set_parameters_callback,
         this, _1));
 
     std::string node_name(this->get_name());
@@ -117,6 +119,8 @@ public:
       node_name + "/connect", std::bind(&UsbNode::connect_callback, this, _1, _2));
     disconnect_service_ = this->create_service<usb_driver_srvs::srv::Disconnect>(
       node_name + "/disconnect", std::bind(&UsbNode::disconnect_callback, this, _1, _2));
+    is_connected_service_ = this->create_service<usb_driver_srvs::srv::IsConnected>(
+      node_name + "/is_connected", std::bind(&UsbNode::is_connected_callback, this, _1, _2));
 
     // make the usb connection - reused for reconnects
     make_usb_connection();
@@ -200,6 +204,7 @@ private:
 
   rclcpp::Service<usb_driver_srvs::srv::Connect>::SharedPtr connect_service_;
   rclcpp::Service<usb_driver_srvs::srv::Disconnect>::SharedPtr disconnect_service_;
+  rclcpp::Service<usb_driver_srvs::srv::IsConnected>::SharedPtr is_connected_service_;
 
   USB_DRIVER_LOCAL
   void make_usb_connection()
@@ -273,9 +278,9 @@ private:
 
     // Check if the parameter exists
     if (!param_client->has_parameter(VENDOR_ID_PARAM_NAME)) {
-        RCLCPP_INFO(
-          this->get_logger(), "Parameter %s not found.",
-          VENDOR_ID_PARAM_NAME.c_str());
+      RCLCPP_INFO(
+        this->get_logger(), "Parameter %s not found.",
+        VENDOR_ID_PARAM_NAME.c_str());
       return;
     }
 
@@ -289,13 +294,13 @@ private:
   USB_DRIVER_LOCAL
   void check_for_product_id_param(rclcpp::SyncParametersClient::SharedPtr param_client)
   {
-    product_id_= 0;  // default to 0 for now, but should be set to the product id of the device
+    product_id_ = 0;  // default to 0 for now, but should be set to the product id of the device
 
     // Check if the parameter exists
     if (!param_client->has_parameter(PRODUCT_ID_PARAM_NAME)) {
-        RCLCPP_INFO(
-          this->get_logger(), "Parameter %s not found.",
-          PRODUCT_ID_PARAM_NAME.c_str());
+      RCLCPP_INFO(
+        this->get_logger(), "Parameter %s not found.",
+        PRODUCT_ID_PARAM_NAME.c_str());
       return;
     }
 
@@ -314,9 +319,9 @@ private:
 
     // Check if the parameter exists
     if (!param_client->has_parameter(DEV_STRING_PARAM_NAME)) {
-        RCLCPP_INFO(
-          this->get_logger(), "Parameter %s not found, will use first device.",
-          DEV_STRING_PARAM_NAME.c_str());
+      RCLCPP_INFO(
+        this->get_logger(), "Parameter %s not found, will use first device.",
+        DEV_STRING_PARAM_NAME.c_str());
       return;
     }
 
@@ -374,7 +379,7 @@ private:
 
 
   USB_DRIVER_LOCAL
-  void connect_callback (
+  void connect_callback(
     const std::shared_ptr<usb_driver_srvs::srv::Connect::Request> request,
     std::shared_ptr<usb_driver_srvs::srv::Connect::Response> response)
   {
@@ -415,13 +420,13 @@ private:
   }
 
   USB_DRIVER_LOCAL
-  void disconnect_callback (
+  void disconnect_callback(
     const std::shared_ptr<usb_driver_srvs::srv::Disconnect::Request> request,
     std::shared_ptr<usb_driver_srvs::srv::Disconnect::Response> response)
   {
     (void)request;
     RCLCPP_DEBUG(
-      get_logger(), "connect service called");
+      get_logger(), "disconnect service called");
 
     if (is_initialising_) {
       RCLCPP_WARN(get_logger(), "disconnect service called but node is still initialising");
@@ -447,6 +452,40 @@ private:
       RCLCPP_ERROR_ONCE(get_logger(), "usbc_ wasnt created when attempting to disconnect USB!");
     }
     (void)response;
+  }
+
+  USB_DRIVER_LOCAL
+  void is_connected_callback(
+    const std::shared_ptr<usb_driver_srvs::srv::IsConnected::Request> request,
+    std::shared_ptr<usb_driver_srvs::srv::IsConnected::Response> response)
+  {
+    (void)request;
+    RCLCPP_DEBUG(
+      get_logger(), "is_connected service called");
+
+    if (is_initialising_) {
+      RCLCPP_WARN(get_logger(), "is_connected service called but node is still initialising");
+      response->connected = false;
+      return;
+    }
+
+    if (!usbc_) {
+      RCLCPP_ERROR_ONCE(get_logger(), "is_connected service called but usbc_ is null");
+      response->connected = false;
+      return;
+    }
+
+    if (usbc_ && !usbc_->devh_valid()) {
+      response->connected = false;
+      return;
+    }
+
+    if (usbc_) {
+      RCLCPP_DEBUG(get_logger(), "is_connected service called - USB device is connected");
+      response->connected = true;
+    } else {
+      RCLCPP_ERROR_ONCE(get_logger(), "usbc_ wasnt created when attempting to check USB connection!");
+    }
   }
 
   USB_DRIVER_LOCAL
@@ -651,6 +690,7 @@ private:
     auto usb_frame = usb_msgs::msg::USBFrame();
     usb_frame.header.stamp = f->ts;
     usb_frame.header.frame_id = frame_id_;
+    usb_frame.encoding = usb_msgs::usb_encodings::RAW;
     usb_frame.data = std::vector<uint8_t>(f->buf.data(), f->buf.data() + f->buf.size());
     usb_frame.frame_xfer_type = usb_msgs::msg::USBFrame::FRAME_XFER_TYPE_IN;
 

@@ -20,6 +20,7 @@ endif()
 rosidl_generate_interfaces(usb_driver_srvs
   "srv/Connect.srv"
   "srv/Disconnect.srv"
+  "srv/IsConnected.srv"
 )
 
 ament_package()

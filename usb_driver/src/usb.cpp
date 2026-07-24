@@ -72,7 +72,8 @@ void Connection::init()
   }
 
   if (vendor_id_ == 0 || product_id_ == 0) {
-    throw std::string("Vendor ID and Product ID must be set to non-zero values for USB initialization");
+    throw std::string(
+      "Vendor ID and Product ID must be set to non-zero values for USB initialization");
   }
 
   int rc = libusb_init(&ctx_);
